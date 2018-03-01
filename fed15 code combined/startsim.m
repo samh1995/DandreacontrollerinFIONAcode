@@ -1,0 +1,121 @@
+
+clc
+clear all
+
+VxImpact =0;
+inclinationImpact = 10; %degrees
+yawImpact = 45; %degrees
+
+angle = (inclinationImpact - 0.0042477)/1.3836686;
+rollImpact = -angle; %degrees
+pitchImpact = -angle; %degrees
+
+%% Declare Globals
+global g
+global timeImpact
+global globalFlag
+
+%% Initialize Simulation Parameters
+ImpactParams = initparams_navi;
+
+SimParams.recordContTime = 0;
+% SimParams.useFaesslerRecovery = 1;%Use Faessler recovery
+SimParams.useRecovery = 1;
+% SimParams.useRecovery2 = 1;
+SimParams.timeFinal =0.1;
+tStep = 1/200;%1/200;
+
+ImpactParams.wallLoc = 30;%1.5;
+ImpactParams.wallPlane = 'YZ';
+ImpactParams.timeDes = 1; %Desired time of impact. Does nothing
+ImpactParams.frictionModel.muSliding = 0.3;%0.3;
+ImpactParams.frictionModel.velocitySliding = 1e-4; %m/s
+timeImpact = 10000;
+timeStabilized = 10000;
+
+%% Initialize Structures
+IC = initIC;
+Control = initcontrol;
+PropState = initpropstate;
+Setpoint = initsetpoint;
+
+[Contact, ImpactInfo] = initcontactstructs;
+localFlag = initflags;
+
+ImpactIdentification = initimpactidentification;
+
+%% Set initial Conditions
+
+%%%%%%%%%%%% ***** SET INITIAL CONDITIONS HERE ***** %%%%%%%%%%%%%%%%%%%%%%
+twist.posnDeriv(1) = VxImpact; %World X Velocity at impact      %%%
+% IC.attEuler = [deg2rad(rollImpact);...                                  %%%
+%                deg2rad(pitchImpact);...                                 %%%
+%                deg2rad(yawImpact)];                                     %%%
+% IC.posn = [ImpactParams.wallLoc-0.32;0;10]; 
+IC.attEuler=[-0.1;0.3;0.5];
+IC.posn=[0;0;10];
+Setpoint.posn(3) = IC.posn(3);                                          %%%
+xAcc = 0;                                                               %%%
+%%%%%%%%%%% ***** END SET INITIAL CONDITIONS HERE ***** %%%%%%%%%%%%%%%%%%%
+
+rotMat = quat2rotmat(angle2quat(-(IC.attEuler(1)+pi),IC.attEuler(2),IC.attEuler(3),'xyz')') % Rrotmat I to body
+
+% [IC.posn(1), VxImpact, SimParams.timeInit, xAcc ] = getinitworldx( ImpactParams, Control.twist.posnDeriv(1),IC, xAcc);
+SimParams.timeInit = 0; %% comment out if using getinitworldx()
+
+Setpoint.head = IC.attEuler(3);
+Setpoint.time = SimParams.timeInit;
+Setpoint.posn(1) = IC.posn(1);
+Trajectory = Setpoint;
+
+IC.linVel =  rotMat*[VxImpact;0;0]; %rotmat takes from intertial to body
+
+Experiment.propCmds = [];
+Experiment.manualCmds = [];
+
+globalFlag.experiment.rpmChkpt = zeros(4,1);
+globalFlag.experiment.rpmChkptIsPassed = zeros(1,4);
+
+[IC.rpm, Control.rpm] = initrpm(rotMat, [xAcc;0;0]); %Start with hovering RPM
+
+PropState.rpm = IC.rpm;
+
+%% Initialize state and kinematics structs from ICs
+[state, stateDeriv] = initstate(IC, xAcc);
+[Pose, Twist] = updatekinematics(state, stateDeriv);
+ 
+%% Initialize sensors
+Sensor = initsensor(state, stateDeriv);
+
+
+
+                                           %% %% dandrea %% %%
+ [Control] = calculatedesacceleration(Pose, Twist); 
+ [Control] = controllerfailrecover(tStep, Pose, Twist, Control);
+
+ %% Propagate Dynamics
+ iSim =0;
+ options = getOdeOptions();
+ [tODE,stateODE] = ode45(@(tODE, stateODE) dynamicsystem(tODE,stateODE, ...
+                                                            tStep,Control.rpm,ImpactParams,PropState.rpm, ...
+                                                            Experiment.propCmds),[iSim iSim+tStep],state,options);
+    
+    % Reset contact flags for continuous time recording        
+    globalFlag.contact = localFlag.contact;
+%    x=R1
+       
+%% Record History
+%     if SimParams.recordContTime == 0
+        
+ [stateDeriv, Contact, PropState] = dynamicsystem(tODE(end),stateODE(end,:), ...
+                                                         tStep,Control.rpm,ImpactParams, PropState.rpm, ...
+                                                         Experiment.propCmds)      ; 
+    state = stateODE(end,:)';
+    t = tODE(end);
+    [Pose, Twist] = updatekinematics(state, stateDeriv);
+    
+    %% Update Sensors
+    Sensor = updatesensor( state, stateDeriv );
+
+    %Discrete Time recording @ 200 Hz
+%     Hist = updatehist(Hist, t, state, stateDeriv, Pose, Twist, Control, PropState, Contact, localFlag, Sensor);
